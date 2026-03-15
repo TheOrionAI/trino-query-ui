@@ -62,7 +62,7 @@ class TrinoQueryRunner {
 
     UpdateStatus(state: any) {
         // If cancelled, handle here because we need state in order to cancel
-        if (this.cancellationToken) {
+        if (this.cancellationToken && state.nextUri) {
             state.stats.state = 'CANCELLING'
             this.state = state
             this.setStatus(state)
@@ -254,6 +254,12 @@ class TrinoQueryRunner {
     }
 
     async NextPage(previous: any) {
+        // If no nextUri the query is already finished (single-page result from server)
+        if (!previous.nextUri) {
+            this.HandleSetAllResults(previous['stats']?.['state'] === 'FAILED')
+            this.HandleStopped()
+            return
+        }
         try {
             // fix cors for testing
             const nextUri = await previous.nextUri.replace(/^https?:\/\/[^/]+/, '')
