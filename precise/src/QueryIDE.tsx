@@ -1,4 +1,6 @@
-import React, { useState, useCallback, useMemo } from 'react'
+import React, { useState, useCallback, useMemo, useEffect } from 'react'
+import TrinoQueryRunner from './AsyncTrinoClient'
+import QueryCharts from './QueryCharts'
 import Editor from '@monaco-editor/react'
 import { 
   Box, styled, IconButton, Typography, Button, Chip, 
@@ -52,108 +54,92 @@ const darkColors = {
 
 type ColorTheme = typeof lightColors
 
-const sampleData = [
-  { id: 1, name: 'Alice Johnson', email: 'alice@example.com', status: 'active', created: '2024-01-15', amount: 1250.00 },
-  { id: 2, name: 'Bob Smith', email: 'bob@example.com', status: 'active', created: '2024-01-16', amount: 890.50 },
-  { id: 3, name: 'Charlie Brown', email: 'charlie@example.com', status: 'pending', created: '2024-01-17', amount: 2100.00 },
-  { id: 4, name: 'Diana Prince', email: 'diana@example.com', status: 'active', created: '2024-01-18', amount: 750.25 },
-  { id: 5, name: 'Eve Wilson', email: 'eve@example.com', status: 'inactive', created: '2024-01-19', amount: 3200.00 },
-  { id: 6, name: 'Frank Miller', email: 'frank@example.com', status: 'active', created: '2024-01-20', amount: 450.75 },
-  { id: 7, name: 'Grace Lee', email: 'grace@example.com', status: 'pending', created: '2024-01-21', amount: 1800.00 },
-  { id: 8, name: 'Henry Chen', email: 'henry@example.com', status: 'active', created: '2024-01-22', amount: 920.00 },
-]
-const columns = ['id', 'name', 'email', 'status', 'created', 'amount']
+/// Run a fire-and-forget query and return all first-page rows as raw arrays.
+function runSimpleQuery(sql: string): Promise<any[][]> {
+  return new Promise((resolve) => {
+    const runner = new TrinoQueryRunner()
+    runner.SetAllResultsCallback((rows: any[], error: boolean) => resolve(error ? [] : rows))
+    runner.SetErrorMessageCallback(() => resolve([]))
+    runner.SetStopped = () => {}
+    runner.SetStarted = () => {}
+    runner.StartQuery(sql)
+  })
+}
 
-const fullSchemaData = [
-  { 
-    name: 'trino', type: 'connector', expanded: false, children: [
-      { name: 'memory', type: 'catalog', expanded: false, children: [
-        { name: 'information_schema', type: 'schema', expanded: false, children: [
-          { name: 'tables', type: 'table', expanded: false, children: [{ name: 'table_name', type: 'column', colType: 'varchar' }, { name: 'table_schema', type: 'column', colType: 'varchar' }] },
-          { name: 'columns', type: 'table', expanded: false, children: [{ name: 'column_name', type: 'column', colType: 'varchar' }, { name: 'data_type', type: 'column', colType: 'varchar' }] }
-        ]},
-        { name: 'tpch', type: 'schema', expanded: false, children: [
-          { name: 'orders', type: 'table', expanded: false, children: [{ name: 'orderkey', type: 'column', colType: 'bigint' }, { name: 'custkey', type: 'column', colType: 'bigint' }, { name: 'orderstatus', type: 'column', colType: 'char' }] },
-          { name: 'lineitem', type: 'table', expanded: false, children: [{ name: 'orderkey', type: 'column', colType: 'bigint' }, { name: 'partkey', type: 'column', colType: 'bigint' }] },
-          { name: 'customer', type: 'table', expanded: false, children: [{ name: 'custkey', type: 'column', colType: 'bigint' }, { name: 'name', type: 'column', colType: 'varchar' }] }
-        ]},
-        { name: 'postgres', type: 'schema', expanded: false, children: [
-          { name: 'users', type: 'table', expanded: false, children: [{ name: 'id', type: 'column', colType: 'integer' }, { name: 'username', type: 'column', colType: 'varchar' }] },
-          { name: 'orders', type: 'table', expanded: false, children: [{ name: 'id', type: 'column', colType: 'integer' }, { name: 'user_id', type: 'column', colType: 'integer' }] }
-        ]}
-      ]},
-      { name: 'hive', type: 'catalog', expanded: false, children: [
-        { name: 'default', type: 'schema', expanded: false, children: [
-          { name: 'sales', type: 'table', expanded: false, children: [{ name: 'id', type: 'column', colType: 'bigint' }, { name: 'amount', type: 'column', colType: 'decimal' }] },
-          { name: 'analytics', type: 'table', expanded: false, children: [{ name: 'event', type: 'column', colType: 'varchar' }, { name: 'timestamp', type: 'column', colType: 'timestamp' }] }
-        ]}
-      ]}
-    ]
-  },
-  { 
-    name: 'postgres', type: 'connector', expanded: false, children: [
-      { name: 'postgresql', type: 'catalog', expanded: false, children: [
-        { name: 'public', type: 'schema', expanded: false, children: [
-          { name: 'employees', type: 'table', expanded: false, children: [{ name: 'id', type: 'column', colType: 'serial' }, { name: 'name', type: 'column', colType: 'varchar' }, { name: 'department', type: 'column', colType: 'varchar' }] }
-        ]}
-      ]}
-    ]
-  },
-  { 
-    name: 'mysql', type: 'connector', expanded: false, children: [
-      { name: 'mysql', type: 'catalog', expanded: false, children: [
-        { name: 'app', type: 'schema', expanded: false, children: [
-          { name: 'transactions', type: 'table', expanded: false, children: [{ name: 'id', type: 'column', colType: 'int' }, { name: 'amount', type: 'column', colType: 'decimal' }] }
-        ]}
-      ]}
-    ]
-  }
-]
-
-const flatSchemaData = [
-  { name: 'memory', type: 'catalog', expanded: false, children: [
-    { name: 'information_schema', type: 'schema', expanded: false, children: [{ name: 'tables', type: 'table', children: [] }, { name: 'columns', type: 'table', children: [] }] },
-    { name: 'tpch', type: 'schema', expanded: false, children: [{ name: 'orders', type: 'table', children: [] }, { name: 'lineitem', type: 'table', children: [] }, { name: 'customer', type: 'table', children: [] }] },
-    { name: 'postgres', type: 'schema', expanded: false, children: [{ name: 'users', type: 'table', children: [] }, { name: 'orders', type: 'table', children: [] }] }
-  ]},
-  { name: 'hive', type: 'catalog', expanded: false, children: [
-    { name: 'default', type: 'schema', expanded: false, children: [{ name: 'sales', type: 'table', children: [] }, { name: 'analytics', type: 'table', children: [] }] }
-  ]},
-  { name: 'postgres', type: 'catalog', expanded: false, children: [
-    { name: 'public', type: 'schema', expanded: false, children: [{ name: 'employees', type: 'table', children: [] }] }
-  ]},
-  { name: 'mysql', type: 'catalog', expanded: false, children: [
-    { name: 'app', type: 'schema', expanded: false, children: [{ name: 'transactions', type: 'table', children: [] }] }
-  ]}
-]
-
-interface QueryTab { id: number; name: string; query: string; results: any[]; isRunning: boolean; completed: boolean }
+interface QueryTab { id: number; name: string; query: string; results: any[][]; columns: any[]; isRunning: boolean; completed: boolean; error?: string; execMs?: number }
 interface TreeNode { name: string; type: string; expanded?: boolean; children?: TreeNode[]; colType?: string }
 
-export const NotebookIDE = () => {
+export const QueryIDE = () => {
   const [darkMode, setDarkMode] = useState(false)
-  const [tabs, setTabs] = useState<QueryTab[]>([{ id: 1, name: 'Query 1', query: 'SELECT * FROM orders LIMIT 10', results: [], isRunning: false, completed: false }])
+  const [tabs, setTabs] = useState<QueryTab[]>([{ id: 1, name: 'Query 1', query: 'SELECT * FROM tpch.sf1.nation LIMIT 10', results: [], columns: [], isRunning: false, completed: false }])
   const [activeTabId, setActiveTabId] = useState(1)
   const [showInspector, setShowInspector] = useState(true)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [showTableSelect, setShowTableSelect] = useState(false)
-  const [connectorMode, setConnectorMode] = useState(true)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [schemaSearch, setSchemaSearch] = useState('')
+  const [schemaTree, setSchemaTree] = useState<TreeNode[]>([])
+  const [schemaLoading, setSchemaLoading] = useState(false)
+  const [resultTab, setResultTab] = useState<'table' | 'chart'>('table')
 
   const colors = darkMode ? darkColors : lightColors
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0]
 
   const handleTabChange = (id: number) => setActiveTabId(id)
-  const addNewTab = () => { const n = Math.max(...tabs.map(t => t.id)) + 1; setTabs([...tabs, { id: n, name: `Query ${n}`, query: 'SELECT * FROM ', results: [], isRunning: false, completed: false }]); setActiveTabId(n) }
+  const addNewTab = () => { const n = Math.max(...tabs.map(t => t.id)) + 1; setTabs([...tabs, { id: n, name: `Query ${n}`, query: 'SELECT * FROM ', results: [], columns: [], isRunning: false, completed: false }]); setActiveTabId(n) }
   const closeTab = (id: number) => { if (tabs.length === 1) return; const n = tabs.filter(t => t.id !== id); setTabs(n); if (activeTabId === id) setActiveTabId(n[0].id) }
   const updateQuery = (q: string) => setTabs(tabs.map(t => t.id === activeTabId ? { ...t, query: q } : t))
 
+  // Load the full catalog → schema → table tree from the live Trino server
+  const loadSchemaTree = useCallback(async () => {
+    setSchemaLoading(true)
+    try {
+      const catRows = await runSimpleQuery('SHOW CATALOGS')
+      const catalogNames = catRows.map((r: any[]) => String(r[0]))
+      const tree: TreeNode[] = []
+      for (const cat of catalogNames) {
+        const schemaRows = await runSimpleQuery(`SHOW SCHEMAS FROM ${cat}`)
+        const schemas = schemaRows
+          .map((r: any[]) => String(r[0]))
+          .filter(s => s !== 'information_schema')
+        const schemaNodes: TreeNode[] = []
+        for (const schema of schemas) {
+          const tableRows = await runSimpleQuery(`SHOW TABLES FROM ${cat}.${schema}`)
+          const tables = tableRows.map((r: any[]) => String(r[0]))
+          schemaNodes.push({ name: schema, type: 'schema', children: tables.map(t => ({ name: t, type: 'table', children: [] })) })
+        }
+        tree.push({ name: cat, type: 'catalog', children: schemaNodes })
+      }
+      setSchemaTree(tree)
+    } catch (e) {
+      console.error('Schema load failed', e)
+    } finally {
+      setSchemaLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { loadSchemaTree() }, [loadSchemaTree])
+
   const handleRunQuery = useCallback(() => {
-    setTabs(tabs.map(t => t.id === activeTabId ? { ...t, isRunning: true } : t))
-    setTimeout(() => setTabs(tabs.map(t => t.id === activeTabId ? { ...t, isRunning: false, results: sampleData, completed: true } : t)), 600)
-  }, [activeTabId, tabs])
+    const sql = activeTab.query.trim()
+    if (!sql || activeTab.isRunning) return
+    const startMs = Date.now()
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: true, completed: false, error: undefined, results: [], columns: [] } : t))
+    const runner = new TrinoQueryRunner()
+    runner.SetColumns = (cols: any[]) => {
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, columns: cols } : t))
+    }
+    runner.SetAllResultsCallback((rows: any[], error: boolean) => {
+      const execMs = Date.now() - startMs
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: false, completed: !error, results: rows, execMs } : t))
+    })
+    runner.SetErrorMessageCallback((msg: string) => {
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: false, error: msg } : t))
+    })
+    runner.SetStopped = () => {}
+    runner.StartQuery(sql)
+  }, [activeTabId, activeTab.query, activeTab.isRunning])
 
   const insertTable = (table: string) => { updateQuery(`SELECT * FROM ${table} LIMIT 100`); setShowTableSelect(false) }
 
@@ -172,11 +158,13 @@ export const NotebookIDE = () => {
     }
   }
 
-  const renderTree = (nodes: TreeNode[], level = 0) => nodes.map(node => {
-    const path = node.name
-    const isExpanded = expanded[path]
+  const renderTree = (nodes: TreeNode[], level = 0, prefix = '') => nodes.map(node => {
+    // qualifiedName is the full dotted path (e.g. "tpch.sf1.nation")
+    const qualifiedName = prefix ? `${prefix}.${node.name}` : node.name
+    const expandKey = qualifiedName
+    const isExpanded = expanded[expandKey]
     const hasChildren = node.children && node.children.length > 0
-    
+
     const searchLower = schemaSearch.toLowerCase()
     const matchesSearch = !schemaSearch || node.name.toLowerCase().includes(searchLower)
     const hasMatchingChild = (n: TreeNode): boolean => {
@@ -184,12 +172,19 @@ export const NotebookIDE = () => {
       return n.children?.some(hasMatchingChild) || false
     }
     const childMatches = node.children?.some(hasMatchingChild) || false
-    
+
     if (!matchesSearch && !childMatches) return null
-    
+
     return (
-      <Box key={path}>
-        <TreeItem level={level} onClick={() => hasChildren && toggleExpand(path)}>
+      <Box key={qualifiedName}>
+        <TreeItem
+          level={level}
+          title={node.type === 'table' ? `Click to query ${qualifiedName}` : undefined}
+          onClick={() => {
+            if (node.type === 'table') insertTable(qualifiedName)
+            else if (hasChildren) toggleExpand(expandKey)
+          }}
+        >
           <TreeIcon>
             {hasChildren ? (isExpanded ? <ExpandMoreIcon sx={{ fontSize: 12 }} /> : <ChevronRightIcon sx={{ fontSize: 12 }} />) : null}
           </TreeIcon>
@@ -199,36 +194,63 @@ export const NotebookIDE = () => {
           </span>
           {node.type === 'column' && node.colType && <ColumnType>{node.colType}</ColumnType>}
         </TreeItem>
-        {isExpanded && node.children?.map(child => renderTree([child], level + 1))}
+        {isExpanded && node.children?.map(child => renderTree([child], level + 1, qualifiedName))}
       </Box>
     )
   })
 
-  const schemaData = connectorMode ? fullSchemaData : flatSchemaData
+  const schemaData = schemaTree
 
-  const sparkData = [30, 45, 60, 40, 70, 55, 80, 65, 75, 50, 85, 70]
-  const histData = [20, 35, 45, 60, 55, 70, 45, 30, 25, 15, 20, 10]
+  // Derive sparkline data from real tab execution times (last 12 completed tabs)
+  const sparkData = useMemo(() => {
+    const times = tabs.filter(t => t.execMs != null).map(t => t.execMs!)
+    if (times.length === 0) return [0]
+    const max = Math.max(...times)
+    return times.slice(-12).map(ms => max > 0 ? Math.round((ms / max) * 100) : 0)
+  }, [tabs])
 
-  const allTables = schemaData.flatMap((node: any) => {
-    if (node.type === 'catalog') {
-      return node.children?.flatMap((sch: any) => 
-        sch.children?.filter((t: any) => t.type === 'table').map((tbl: any) => `${node.name}.${sch.name}.${tbl.name}`) || []
-      ) || []
-    }
-    return node.children?.flatMap((cat: any) => 
-      cat.children?.flatMap((sch: any) => 
-        sch.children?.filter((t: any) => t.type === 'table').map((tbl: any) => `${node.name}.${cat.name}.${sch.name}.${tbl.name}`) || []
-      ) || []
-    ) || []
-  })
+  // Distribution histogram of exec times across all completed tabs
+  const histData = useMemo(() => {
+    const times = tabs.filter(t => t.execMs != null).map(t => t.execMs!)
+    if (times.length === 0) return [0]
+    const max = Math.max(...times)
+    const bins = 12
+    const binSize = max / bins || 1
+    const counts = Array(bins).fill(0)
+    times.forEach(ms => { counts[Math.min(Math.floor(ms / binSize), bins - 1)]++ })
+    const maxCount = Math.max(...counts)
+    return counts.map(c => maxCount > 0 ? Math.round((c / maxCount) * 100) : 0)
+  }, [tabs])
+
+  // Parse catalog.schema from the active query's FROM clause
+  const breadcrumb = useMemo(() => {
+    const match = activeTab.query.match(/\bfrom\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\./i)
+    if (match) return { catalog: match[1], schema: match[2] }
+    return null
+  }, [activeTab.query])
+
+  // Real exec-time stats across all completed tabs
+  const execTimes = tabs.filter(t => t.execMs != null).map(t => t.execMs!)
+  const statsMin = execTimes.length > 0 ? Math.min(...execTimes) : null
+  const statsMax = execTimes.length > 0 ? Math.max(...execTimes) : null
+  const statsAvg = execTimes.length > 0 ? Math.round(execTimes.reduce((a, b) => a + b, 0) / execTimes.length) : null
+
+  const allTables = schemaTree.flatMap((cat: TreeNode) =>
+    (cat.children || []).flatMap((schema: TreeNode) =>
+      (schema.children || [])
+        .filter(t => t.type === 'table')
+        .map(t => `${cat.name}.${schema.name}.${t.name}`)
+    )
+  )
 
   React.useEffect(() => {
     if (schemaSearch) {
       const newExpanded: Record<string, boolean> = {}
-      const markExpanded = (nodes: TreeNode[]) => {
+      const markExpanded = (nodes: TreeNode[], prefix = '') => {
         nodes.forEach(node => {
-          newExpanded[node.name] = true
-          if (node.children) markExpanded(node.children)
+          const key = prefix ? `${prefix}.${node.name}` : node.name
+          newExpanded[key] = true
+          if (node.children) markExpanded(node.children, key)
         })
       }
       markExpanded(schemaData)
@@ -474,6 +496,9 @@ export const NotebookIDE = () => {
           <IconBtn size="small" onClick={() => setShowInspector(!showInspector)}>
             {showInspector ? <ToggleOnIcon sx={{ fontSize: 16, color: colors.primary }} /> : <ToggleOffIcon sx={{ fontSize: 16 }} />}
           </IconBtn>
+          <IconBtn size="small" onClick={() => setShowAnalytics(true)} title="Query Analytics">
+            <BarChartIcon sx={{ fontSize: 14 }} />
+          </IconBtn>
           <IconBtn size="small"><SearchIcon sx={{ fontSize: 14 }} /></IconBtn>
           <RunButton variant="contained" startIcon={<PlayArrowIcon sx={{ fontSize: 12 }} />} onClick={handleRunQuery} disabled={activeTab.isRunning}>
             {activeTab.isRunning ? 'Running...' : 'Run'}
@@ -486,12 +511,9 @@ export const NotebookIDE = () => {
           <SidebarHeader>
             <SidebarTitle>
               <SidebarTitleText>Schema Browser</SidebarTitleText>
-              <ToggleSwitch onClick={() => setConnectorMode(!connectorMode)}>
-                {connectorMode ? <ToggleOnIcon sx={{ fontSize: 12, color: colors.primary }} /> : <ToggleOffIcon sx={{ fontSize: 12 }} />}
-                <span>Connector</span>
-              </ToggleSwitch>
+              {schemaLoading && <SidebarTitleText sx={{ color: colors.textMuted }}>Loading…</SidebarTitleText>}
             </SidebarTitle>
-            <IconBtn size="small"><RefreshIcon sx={{ fontSize: 12 }} /></IconBtn>
+            <IconBtn size="small" onClick={loadSchemaTree} disabled={schemaLoading}><RefreshIcon sx={{ fontSize: 12, animation: schemaLoading ? 'spin 1s linear infinite' : 'none' }} /></IconBtn>
           </SidebarHeader>
           <Box sx={{ px: 1, py: 0.5 }}>
             <SearchField 
@@ -511,7 +533,10 @@ export const NotebookIDE = () => {
         <Workspace>
           <WorkspaceHeader>
             <Breadcrumb>
-              <span>memory</span><span>›</span><span>tpch</span>
+              {breadcrumb
+                ? <><span>{breadcrumb.catalog}</span><span>›</span><span>{breadcrumb.schema}</span></>
+                : <span style={{ color: colors.textMuted }}>—</span>
+              }
             </Breadcrumb>
           </WorkspaceHeader>
 
@@ -525,7 +550,7 @@ export const NotebookIDE = () => {
                 </TablePicker>
               </CellLabel>
               <CellStatus>
-                {activeTab.isRunning ? <><LinearProgress sx={{ width: 40, height: 3 }} /><span>Running...</span></> : activeTab.completed ? <><StatusDot /><span>642ms</span></> : <span>Ready</span>}
+                {activeTab.isRunning ? <><LinearProgress sx={{ width: 40, height: 3 }} /><span>Running...</span></> : activeTab.completed ? <><StatusDot /><span>{activeTab.execMs != null ? `${activeTab.execMs}ms` : 'done'}</span></> : activeTab.error ? <span style={{ color: '#f06c6c' }}>Error</span> : <span>Ready</span>}
               </CellStatus>
             </CellHeader>
             <CellEditor>
@@ -547,41 +572,68 @@ export const NotebookIDE = () => {
                 }} 
               />
             </CellEditor>
-            {activeTab.results.length > 0 && (
+            {activeTab.error && (
+              <Box sx={{ px: 2, py: 1, color: '#f06c6c', fontSize: 11, fontFamily: 'monospace', backgroundColor: colors.bgTertiary, borderTop: `1px solid ${colors.border}` }}>
+                Error: {activeTab.error}
+              </Box>
+            )}
+            {activeTab.results.length > 0 && activeTab.columns.length > 0 && (
               <CellResults>
-                <ResultsTable>
-                  <TableHead>
-                    <TableRow>
-                      {columns.map(c => <TableCell key={c}>{c}</TableCell>)}
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {activeTab.results.map((row, i) => (
-                      <TableRow key={i}>
-                        {columns.map(c => (
-                          <TableCell key={c}>
-                            {c === 'status' ? (
-                              <Chip 
-                                label={row[c]} 
-                                size="small" 
-                                sx={{ 
-                                  height: 14, 
-                                  fontSize: 8, 
-                                  backgroundColor: row[c] === 'active' ? '#D1FAE5' : row[c] === 'pending' ? '#FEF3C7' : '#FEE2E2', 
-                                  color: row[c] === 'active' ? '#065F46' : row[c] === 'pending' ? '#92400E' : '#991B1B' 
-                                }} 
-                              />
-                            ) : row[c]}
-                          </TableCell>
+                {/* Result tab bar: Table | Chart */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: `1px solid ${colors.border}`, backgroundColor: colors.bgSecondary }}>
+                  {(['table', 'chart'] as const).map(tab => (
+                    <Box
+                      key={tab}
+                      onClick={() => setResultTab(tab)}
+                      sx={{
+                        px: 1, py: 0.25, fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 1,
+                        textTransform: 'uppercase', letterSpacing: '0.05em',
+                        color: resultTab === tab ? colors.primary : colors.textMuted,
+                        backgroundColor: resultTab === tab ? `${colors.primary}18` : 'transparent',
+                        '&:hover': { color: colors.primary },
+                      }}
+                    >
+                      {tab === 'table' ? 'Table' : 'Chart'}
+                    </Box>
+                  ))}
+                </Box>
+
+                {resultTab === 'table' ? (
+                  <>
+                    <ResultsTable>
+                      <TableHead>
+                        <TableRow>
+                          {activeTab.columns.map((col: any, i: number) => (
+                            <TableCell key={i}>{col.name}</TableCell>
+                          ))}
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {activeTab.results.map((row: any[], i: number) => (
+                          <TableRow key={i}>
+                            {activeTab.columns.map((_: any, j: number) => (
+                              <TableCell key={j}>
+                                {row[j] === null || row[j] === undefined ? <span style={{ color: colors.textMuted, fontStyle: 'italic' }}>NULL</span> : String(row[j])}
+                              </TableCell>
+                            ))}
+                          </TableRow>
                         ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </ResultsTable>
-                <ResultFooter>
-                  <span>{activeTab.results.length} rows</span>
-                  <span>0.64s</span>
-                </ResultFooter>
+                      </TableBody>
+                    </ResultsTable>
+                    <ResultFooter>
+                      <span>{activeTab.results.length} rows</span>
+                      <span>{activeTab.execMs != null ? `${activeTab.execMs}ms` : ''}</span>
+                    </ResultFooter>
+                  </>
+                ) : (
+                  <QueryCharts
+                    columns={activeTab.columns}
+                    rows={activeTab.results.map((row: any[]) =>
+                      Object.fromEntries(activeTab.columns.map((col: any, j: number) => [col.name, row[j]]))
+                    )}
+                    height={300}
+                  />
+                )}
               </CellResults>
             )}
           </CellContainer>
@@ -611,8 +663,7 @@ export const NotebookIDE = () => {
         </Box>
         <Box>
           <span>{activeTab.results.length} rows</span>
-          <span style={{ margin: '0 8px' }}>|</span>
-          <span>memory</span>
+          {activeTab.execMs != null && <><span style={{ margin: '0 8px' }}>|</span><span>{activeTab.execMs}ms</span></>}
         </Box>
       </StatusBar>
 
@@ -628,8 +679,18 @@ export const NotebookIDE = () => {
           <AnalyticsGrid>
             <AnalyticsCard><AnalyticsTitle>Execution Time</AnalyticsTitle><Sparkline>{sparkData.map((h, i) => <SparkBar key={i} h={h} />)}</Sparkline></AnalyticsCard>
             <AnalyticsCard><AnalyticsTitle>Distribution</AnalyticsTitle><Histogram>{histData.map((h, i) => <HistBar key={i} h={h} />)}</Histogram></AnalyticsCard>
-            <AnalyticsCard><AnalyticsTitle>Stats</AnalyticsTitle><InspectorRow><InspectorLabel>Min</InspectorLabel><InspectorValue>$450</InspectorValue></InspectorRow><InspectorRow><InspectorLabel>Max</InspectorLabel><InspectorValue>$3,200</InspectorValue></InspectorRow><InspectorRow><InspectorLabel>Avg</InspectorLabel><InspectorValue>$1,395</InspectorValue></InspectorRow></AnalyticsCard>
-            <AnalyticsCard><AnalyticsTitle>Summary</AnalyticsTitle><InspectorRow><InspectorLabel>Status</InspectorLabel><InspectorValue style={{ color: colors.success }}>✓ Success</InspectorValue></InspectorRow><InspectorRow><InspectorLabel>Time</InspectorLabel><InspectorValue>642ms</InspectorValue></InspectorRow><InspectorRow><InspectorLabel>Memory</InspectorLabel><InspectorValue>2.4MB</InspectorValue></InspectorRow></AnalyticsCard>
+            <AnalyticsCard>
+              <AnalyticsTitle>Exec Time (ms)</AnalyticsTitle>
+              <InspectorRow><InspectorLabel>Min</InspectorLabel><InspectorValue>{statsMin != null ? `${statsMin}ms` : '—'}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>Max</InspectorLabel><InspectorValue>{statsMax != null ? `${statsMax}ms` : '—'}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>Avg</InspectorLabel><InspectorValue>{statsAvg != null ? `${statsAvg}ms` : '—'}</InspectorValue></InspectorRow>
+            </AnalyticsCard>
+            <AnalyticsCard>
+              <AnalyticsTitle>Current Query</AnalyticsTitle>
+              <InspectorRow><InspectorLabel>Status</InspectorLabel><InspectorValue style={{ color: activeTab.error ? '#f06c6c' : colors.success }}>{activeTab.completed ? '✓ Success' : activeTab.error ? '✗ Error' : '—'}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>Time</InspectorLabel><InspectorValue>{activeTab.execMs != null ? `${activeTab.execMs}ms` : '—'}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>Rows</InspectorLabel><InspectorValue>{activeTab.results.length > 0 ? activeTab.results.length : '—'}</InspectorValue></InspectorRow>
+            </AnalyticsCard>
           </AnalyticsGrid>
         </ModalContent>
       </AnalyticsModal>
@@ -654,4 +715,4 @@ export const NotebookIDE = () => {
   )
 }
 
-export default NotebookIDE
+export default QueryIDE
