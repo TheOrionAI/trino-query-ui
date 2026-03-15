@@ -40,6 +40,7 @@
     "check": "npm install && npm run lint && npm run prettier:check",
     "check:clean": "npm clean-install && npm run lint && npm run prettier:check",
     "preview": "vite preview",
+    "dev:modern": "vite --config vite.config.modern.ts",
     "antlr4ng": "antlr4ng -visitor -listener -Dlanguage=TypeScript -o src/generated/lexer/SqlBase.g4 trino/SqlBase.g4"
   },
   "dependencies": {
@@ -52,6 +53,9 @@
     "@mui/x-tree-view": "^8.13.1",
     "antlr4-c3": "^3.4.4",
     "antlr4ng": "^3.0.16",
+    "framer-motion": "^11.15.0",
+    "react-resizable-panels": "^2.1.7",
+    "recharts": "^2.15.0",
     "sql-formatter": "^15.6.9",
     "uuidv4": "^6.2.13"
   },
