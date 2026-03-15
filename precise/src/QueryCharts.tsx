@@ -92,11 +92,11 @@ const generateChartData = (columns: string[], rows: DataPoint[]): { barData: any
         return typeof value === 'string'
     }) || columns[0]
 
-    const pieDataMap = rows.reduce((acc, row) => {
+    const pieDataMap: Record<string, number> = {}
+    for (const row of rows) {
         const key = String(row[pieColumn] || 'Unknown')
-        acc[key] = (acc[key] || 0) + 1
-        return acc
-    }, {} as Record<string, number>)
+        pieDataMap[key] = (pieDataMap[key] || 0) + 1
+    }
 
     const pieData = Object.entries(pieDataMap).map(([name, value]) => ({
         name: name.length > 15 ? name.substring(0, 15) + '...' : name,
@@ -107,7 +107,7 @@ const generateChartData = (columns: string[], rows: DataPoint[]): { barData: any
 }
 
 export const QueryCharts = ({ columns, rows, height }: QueryChartsProps) => {
-    const columnNames = columns.map(c => c.name || c.field || 'unknown')
+    const columnNames: string[] = columns.map(c => String(c.name || c.field || 'unknown'))
     const { barData, lineData, pieData } = generateChartData(columnNames, rows)
 
     if (rows.length === 0) {

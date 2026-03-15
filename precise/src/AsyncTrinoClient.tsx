@@ -21,6 +21,10 @@ class TrinoQueryRunner {
     previous_progress = 0
     cancellationReason: string = ''
 
+    // Configurable options
+    private timeoutMs: number = 15000
+    private maxRows: number = 10000
+
     // Add properties to store catalog and schema headers
     private trinoCatalog: string | null = null
     private trinoSchema: string | null = null
@@ -56,6 +60,21 @@ class TrinoQueryRunner {
         return this.trinoSchema
     }
 
+    // Add setter methods for configurable options
+    SetTimeout(timeoutMs: number): TrinoQueryRunner {
+        this.timeoutMs = timeoutMs
+        return this
+    }
+
+    SetMaxRows(maxRows: number): TrinoQueryRunner {
+        this.maxRows = maxRows
+        return this
+    }
+
+    GetMaxRows(): number {
+        return this.maxRows
+    }
+
     FirstColumn(): string[] {
         return this.pages.map((page) => page.map((row: any[]) => row[0]))[0]
     }
@@ -66,10 +85,19 @@ class TrinoQueryRunner {
             state.stats.state = 'CANCELLING'
             this.state = state
             this.setStatus(state)
-            const nextUri = state.nextUri.replace(/^https?:\/\/[^/]+/, '')
+            
+            // Convert absolute URL to relative path for cancellation request
+            let cancelPath: string
+            try {
+                const url = new URL(state.nextUri)
+                cancelPath = url.pathname + url.search
+            } catch {
+                // If URL parsing fails, use as-is (might already be relative)
+                cancelPath = state.nextUri
+            }
 
             // cancel query
-            fetch(nextUri, {
+            fetch(cancelPath, {
                 method: 'DELETE',
                 headers: {
                     'X-Trino-User': 'system',
@@ -155,7 +183,7 @@ class TrinoQueryRunner {
         this.ClearState()
 
         const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort('Timeout: Trino is not responding'), 15000)
+        const timeoutId = setTimeout(() => controller.abort('Timeout: Trino is not responding'), this.timeoutMs)
 
         // Prepare headers for the request
         const headers: Record<string, string> = {
@@ -261,9 +289,17 @@ class TrinoQueryRunner {
             return
         }
         try {
-            // fix cors for testing
-            const nextUri = await previous.nextUri.replace(/^https?:\/\/[^/]+/, '')
-            const response = await fetch(nextUri, {
+            // Convert absolute URL to relative path for fetching next page
+            let nextUriPath: string
+            try {
+                const url = new URL(previous.nextUri)
+                nextUriPath = url.pathname + url.search
+            } catch {
+                // If URL parsing fails, use as-is (might already be relative)
+                nextUriPath = previous.nextUri
+            }
+            
+            const response = await fetch(nextUriPath, {
                 method: 'GET',
                 headers: {
                     'X-Trino-User': 'system',
@@ -321,21 +357,19 @@ class TrinoQueryRunner {
             this.SetColumns(data.columns)
         }
 
-        const maxRows = 10000
-
         if (data.data) {
-            if (data.data.length + this.rowsRead > maxRows) {
+            if (data.data.length + this.rowsRead > this.maxRows) {
                 // modify this page so we hit maxRows rows exactly
-                const trim = maxRows - this.rowsRead
+                const trim = this.maxRows - this.rowsRead
                 this.rowsRead += trim
                 const page: any[] = data.data.slice(0, trim)
                 this.pages.push(page)
 
                 // set error indicating rows were trimmed formatted using maxRows with commas
-                this.setErrorMessage('Results were trimmed to ' + maxRows.toLocaleString() + ' rows')
+                this.setErrorMessage('Results were trimmed to ' + this.maxRows.toLocaleString() + ' rows')
                 this.SetResults(this.pages)
                 // cancel
-                this.CancelQuery('Results were trimmed to ' + maxRows.toLocaleString() + ' rows')
+                this.CancelQuery('Results were trimmed to ' + this.maxRows.toLocaleString() + ' rows')
                 return false
             } else {
                 this.pages.push(data.data)
