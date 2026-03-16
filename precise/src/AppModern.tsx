@@ -1,9 +1,9 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import QueryIDE from './QueryIDE'
+import QueryStudio from './QueryStudio'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <QueryIDE />
+    <QueryStudio />
   </React.StrictMode>
 )
