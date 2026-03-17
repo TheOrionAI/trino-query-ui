@@ -15,6 +15,7 @@ import QueryCharts from './QueryCharts'
 import { darkTheme, lightTheme, themeTokens } from './theme'
 import Queries from './schema/Queries'
 import QueryInfo from './schema/QueryInfo'
+import TrinoQueryRunner from './AsyncTrinoClient'
 
 // Styled components
 const EditorContainer = styled('div')({
@@ -198,6 +199,7 @@ export const ModernQueryEditor = ({
     const [columns, setColumns] = useState<any[]>([])
     const [response, setResponse] = useState<any>(null)
     const [errorMessage, setErrorMessage] = useState('')
+    const [queryText, setQueryText] = useState('SELECT * FROM tpch.tiny.nation LIMIT 10')
 
     const currentTheme = theme === 'dark' ? darkTheme : lightTheme
 
@@ -228,26 +230,26 @@ export const ModernQueryEditor = ({
     }, [isDragging])
 
     const handleRunQuery = useCallback(() => {
+        if (!queryText.trim()) return
         setIsRunning(true)
         setErrorMessage('')
-        
-        // Simulate query execution - in real app, this would call Trino
-        setTimeout(() => {
+        setResults([])
+        setColumns([])
+        setQueryId(undefined)
+
+        const runner = new TrinoQueryRunner()
+        runner.SetColumns = (cols: any[]) => setColumns(cols)
+        runner.SetAllResultsCallback((rows: any[], error: boolean) => {
             setIsRunning(false)
-            // Set sample results
-            setQueryId('sample-query-id')
-            setColumns([
-                { name: 'id', type: 'integer' },
-                { name: 'name', type: 'varchar' },
-                { name: 'created_at', type: 'timestamp' },
-            ])
-            setResults([
-                { id: 1, name: 'Alice', created_at: '2024-01-15' },
-                { id: 2, name: 'Bob', created_at: '2024-01-16' },
-                { id: 3, name: 'Charlie', created_at: '2024-01-17' },
-            ])
-        }, 1000)
-    }, [])
+            if (!error) setResults(rows)
+        })
+        runner.SetErrorMessageCallback((msg: string) => {
+            setIsRunning(false)
+            setErrorMessage(msg)
+        })
+        runner.SetStopped = () => setIsRunning(false)
+        runner.StartQuery(queryText)
+    }, [queryText])
 
     const handleClearResults = useCallback((id: string | undefined) => {
         setResults([])
@@ -255,7 +257,7 @@ export const ModernQueryEditor = ({
     }, [])
 
     const handleQueryChange = useCallback((query: string) => {
-        // Handle query changes
+        setQueryText(query)
     }, [])
 
     const handleSelectChange = useCallback((selectedText: string) => {
@@ -391,15 +393,23 @@ export const ModernQueryEditor = ({
                                     )
                                 )}
                                 {activeTab === 'charts' && (
-                                    <EmptyState>
-                                        <BarChartIcon sx={{ fontSize: 48, opacity: 0.3 }} />
-                                        <Typography variant="body2">
-                                            Charts visualization
-                                        </Typography>
-                                        <Typography variant="caption" sx={{ opacity: 0.5 }}>
-                                            Visualize your query results as charts
-                                        </Typography>
-                                    </EmptyState>
+                                    results.length > 0 ? (
+                                        <QueryCharts
+                                            columns={columns}
+                                            rows={results}
+                                            height={resultsHeight - 40}
+                                        />
+                                    ) : (
+                                        <EmptyState>
+                                            <BarChartIcon sx={{ fontSize: 48, opacity: 0.3 }} />
+                                            <Typography variant="body2">
+                                                Charts visualization
+                                            </Typography>
+                                            <Typography variant="caption" sx={{ opacity: 0.5 }}>
+                                                Run a query to visualize results as charts
+                                            </Typography>
+                                        </EmptyState>
+                                    )
                                 )}
                                 {activeTab === 'explain' && (
                                     <EmptyState>

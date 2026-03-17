@@ -16,6 +16,7 @@ import HistoryIcon from '@mui/icons-material/History'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import TrendingUpIcon from '@mui/icons-material/TrendingUp'
 import { darkTheme, lightTheme } from './theme'
+import TrinoQueryRunner from './AsyncTrinoClient'
 
 // Modern color palette - inspired by modern code editors
 const colors = {
@@ -228,16 +229,6 @@ const Resizer = styled(Box)({
   },
 })
 
-// Sample data for demo
-const sampleResults = [
-  { id: 1, name: 'Alice Johnson', email: 'alice@example.com', status: 'active', created: '2024-01-15' },
-  { id: 2, name: 'Bob Smith', email: 'bob@example.com', status: 'active', created: '2024-01-16' },
-  { id: 3, name: 'Charlie Brown', email: 'charlie@example.com', status: 'pending', created: '2024-01-17' },
-  { id: 4, name: 'Diana Prince', email: 'diana@example.com', status: 'active', created: '2024-01-18' },
-  { id: 5, name: 'Eve Wilson', email: 'eve@example.com', status: 'inactive', created: '2024-01-19' },
-]
-
-const sampleColumns = ['id', 'name', 'email', 'status', 'created']
 
 interface SleekQueryEditorProps {
   height: number
@@ -251,7 +242,9 @@ ORDER BY created DESC
 LIMIT 100`)
   const [isRunning, setIsRunning] = useState(false)
   const [results, setResults] = useState<any[]>([])
+  const [columns, setColumns] = useState<string[]>([])
   const [showResults, setShowResults] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
   const editorRef = useRef<any>(null)
 
   const handleEditorMount = (editor: any) => {
@@ -259,15 +252,26 @@ LIMIT 100`)
   }
 
   const handleRunQuery = useCallback(() => {
+    if (!query.trim()) return
     setIsRunning(true)
     setShowResults(true)
-    
-    // Simulate query execution
-    setTimeout(() => {
+    setResults([])
+    setColumns([])
+    setErrorMessage('')
+
+    const runner = new TrinoQueryRunner()
+    runner.SetColumns = (cols: any[]) => setColumns(cols.map((c: any) => c.name ?? String(c)))
+    runner.SetAllResultsCallback((rows: any[], error: boolean) => {
       setIsRunning(false)
-      setResults(sampleResults)
-    }, 800)
-  }, [])
+      if (!error) setResults(rows)
+    })
+    runner.SetErrorMessageCallback((msg: string) => {
+      setIsRunning(false)
+      setErrorMessage(msg)
+    })
+    runner.SetStopped = () => setIsRunning(false)
+    runner.StartQuery(query)
+  }, [query])
 
   // Handle Ctrl+Enter
   useEffect(() => {
@@ -416,8 +420,21 @@ LIMIT 100`)
               {activeTab === 'table' && (
                 showResults ? (
                   <Box>
+                    {errorMessage && (
+                      <Box sx={{
+                        mb: 2, p: 2,
+                        backgroundColor: alpha(colors.error, 0.1),
+                        border: `1px solid ${alpha(colors.error, 0.3)}`,
+                        borderRadius: 1,
+                        color: colors.error,
+                        fontSize: 13,
+                        fontFamily: '"JetBrains Mono", monospace',
+                      }}>
+                        {errorMessage}
+                      </Box>
+                    )}
                     {/* Results Table */}
-                    <table style={{ 
+                    <table style={{
                       width: '100%', 
                       borderCollapse: 'collapse',
                       fontSize: 13,
@@ -425,7 +442,7 @@ LIMIT 100`)
                     }}>
                       <thead>
                         <tr>
-                          {sampleColumns.map((col) => (
+                          {columns.map((col) => (
                             <th key={col} style={{
                               textAlign: 'left',
                               padding: '10px 12px',
@@ -448,7 +465,7 @@ LIMIT 100`)
                           <tr key={idx} style={{
                             backgroundColor: idx % 2 === 0 ? 'transparent' : alpha(colors.bgTertiary, 0.3),
                           }}>
-                            {sampleColumns.map((col) => (
+                            {columns.map((col) => (
                               <td key={col} style={{
                                 padding: '10px 12px',
                                 color: colors.text,
