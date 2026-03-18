@@ -8,7 +8,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['gmm.tail27855e.ts.net'],
+    allowedHosts: true,
     proxy: {
       '/v1': {
         target: 'http://localhost:8080',

@@ -324,8 +324,15 @@ class TrinoQueryRunner {
                     return
                 }
 
-                // backoff delay add 20ms up to 1000ms
-                this.backoff_delay_msec = Math.min(this.backoff_delay_msec + 20, 1000)
+                // Adaptive backoff: reset to 0 whenever data arrives (query is
+                // actively producing results), otherwise ramp up to 200 ms max.
+                // Capping at 200 ms (vs the old 1000 ms) ensures the client
+                // detects query completion within 200 ms of the server finishing.
+                if (data.data && data.data.length > 0) {
+                    this.backoff_delay_msec = 0
+                } else {
+                    this.backoff_delay_msec = Math.min(this.backoff_delay_msec + 20, 200)
+                }
                 setTimeout(() => this.NextPage(data), this.backoff_delay_msec)
             } else {
                 this.HandleSetAllResults(data['stats']['state'] == 'FAILED')
