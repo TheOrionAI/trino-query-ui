@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { ThemeProvider, CssBaseline } from '@mui/material'
-import { Box, styled, alpha, IconButton, Tooltip, Typography, Button, Chip } from '@mui/material'
+import { Box, styled, alpha, IconButton, Tooltip, Typography, Button, Chip, CircularProgress } from '@mui/material'
 import Editor from '@monaco-editor/react'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import KeyboardReturnIcon from '@mui/icons-material/KeyboardReturn'
@@ -17,6 +17,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import TrendingUpIcon from '@mui/icons-material/TrendingUp'
 import { darkTheme, lightTheme } from './theme'
 import TrinoQueryRunner from './AsyncTrinoClient'
+import QueryCharts from './QueryCharts'
 
 // Modern color palette - inspired by modern code editors
 const colors = {
@@ -245,6 +246,9 @@ LIMIT 100`)
   const [columns, setColumns] = useState<string[]>([])
   const [showResults, setShowResults] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [queryId, setQueryId] = useState<string | null>(null)
+  const [explainPlan, setExplainPlan] = useState<string | null>(null)
+  const [explainLoading, setExplainLoading] = useState(false)
   const editorRef = useRef<any>(null)
 
   const handleEditorMount = (editor: any) => {
@@ -258,20 +262,41 @@ LIMIT 100`)
     setResults([])
     setColumns([])
     setErrorMessage('')
+    setQueryId(null)
+    setExplainPlan(null)
 
     const runner = new TrinoQueryRunner()
     runner.SetColumns = (cols: any[]) => setColumns(cols.map((c: any) => c.name ?? String(c)))
     runner.SetAllResultsCallback((rows: any[], error: boolean) => {
       setIsRunning(false)
-      if (!error) setResults(rows)
+      if (!error) {
+        setResults(rows)
+        const id = runner.GetQueryId()
+        if (id) setQueryId(id)
+      }
     })
     runner.SetErrorMessageCallback((msg: string) => {
       setIsRunning(false)
       setErrorMessage(msg)
     })
-    runner.SetStopped = () => setIsRunning(false)
+    runner.SetStopped = () => {
+      setIsRunning(false)
+      const id = runner.GetQueryId()
+      if (id) setQueryId(id)
+    }
     runner.StartQuery(query)
   }, [query])
+
+  // Fetch explain plan when the tab is active and we have a queryId
+  useEffect(() => {
+    if (activeTab !== 'explain' || !queryId || explainPlan !== null) return
+    setExplainLoading(true)
+    fetch(`/v1/query/${queryId}/explain`)
+      .then(r => r.ok ? r.json() : r.json().then((j: any) => { throw new Error(j?.error?.message || 'Failed') }))
+      .then((d: any) => setExplainPlan(d.plan ?? JSON.stringify(d, null, 2)))
+      .catch((e: Error) => setExplainPlan(`Error: ${e.message}`))
+      .finally(() => setExplainLoading(false))
+  }, [activeTab, queryId, explainPlan])
 
   // Handle Ctrl+Enter
   useEffect(() => {
@@ -523,41 +548,47 @@ LIMIT 100`)
               )}
               
               {activeTab === 'charts' && (
-                <Box sx={{ 
-                  height: '100%', 
-                  display: 'flex', 
-                  flexDirection: 'column',
-                  alignItems: 'center', 
-                  justifyContent: 'center',
-                  color: colors.textMuted,
-                }}>
-                  <BarChartIcon sx={{ fontSize: 64, opacity: 0.2, mb: 2 }} />
-                  <Typography variant="h6" sx={{ color: colors.textSecondary, mb: 1 }}>
-                    Charts
-                  </Typography>
-                  <Typography variant="body2" sx={{ opacity: 0.5 }}>
-                    Visualize your query results
-                  </Typography>
-                </Box>
+                results.length > 0 ? (
+                  <QueryCharts
+                    columns={columns.map(c => ({ name: c }))}
+                    rows={results}
+                    height={400}
+                  />
+                ) : (
+                  <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: colors.textMuted }}>
+                    <BarChartIcon sx={{ fontSize: 64, opacity: 0.2, mb: 2 }} />
+                    <Typography variant="h6" sx={{ color: colors.textSecondary, mb: 1 }}>Charts</Typography>
+                    <Typography variant="body2" sx={{ opacity: 0.5 }}>Run a query to visualize results</Typography>
+                  </Box>
+                )
               )}
-              
+
               {activeTab === 'explain' && (
-                <Box sx={{ 
-                  height: '100%', 
-                  display: 'flex', 
-                  flexDirection: 'column',
-                  alignItems: 'center', 
-                  justifyContent: 'center',
-                  color: colors.textMuted,
-                }}>
-                  <AccountTreeIcon sx={{ fontSize: 64, opacity: 0.2, mb: 2 }} />
-                  <Typography variant="h6" sx={{ color: colors.textSecondary, mb: 1 }}>
-                    Query Plan
-                  </Typography>
-                  <Typography variant="body2" sx={{ opacity: 0.5 }}>
-                    View the execution plan
-                  </Typography>
-                </Box>
+                !queryId ? (
+                  <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: colors.textMuted }}>
+                    <AccountTreeIcon sx={{ fontSize: 64, opacity: 0.2, mb: 2 }} />
+                    <Typography variant="h6" sx={{ color: colors.textSecondary, mb: 1 }}>Query Plan</Typography>
+                    <Typography variant="body2" sx={{ opacity: 0.5 }}>Run a query to view the execution plan</Typography>
+                  </Box>
+                ) : explainLoading ? (
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                    <CircularProgress size={24} />
+                  </Box>
+                ) : (
+                  <Box sx={{
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    whiteSpace: 'pre',
+                    overflowX: 'auto',
+                    overflowY: 'auto',
+                    height: '100%',
+                    padding: 2,
+                    color: colors.text,
+                    lineHeight: 1.6,
+                  }}>
+                    {explainPlan || 'No plan available'}
+                  </Box>
+                )
               )}
             </ResultsContent>
           </ResultsSection>

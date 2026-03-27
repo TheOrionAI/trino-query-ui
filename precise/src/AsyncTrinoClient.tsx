@@ -28,6 +28,7 @@ class TrinoQueryRunner {
     // Add properties to store catalog and schema headers
     private trinoCatalog: string | null = null
     private trinoSchema: string | null = null
+    private queryId: string | null = null
     private setHeadersCallback: (catalog: string | null, schema: string | null) => void = () => {}
 
     SetAllResultsCallback(setAllResults: (n: any[], error: boolean) => any): TrinoQueryRunner {
@@ -58,6 +59,10 @@ class TrinoQueryRunner {
 
     GetSchema(): string | null {
         return this.trinoSchema
+    }
+
+    GetQueryId(): string | null {
+        return this.queryId
     }
 
     // Add setter methods for configurable options
@@ -359,6 +364,11 @@ class TrinoQueryRunner {
     }
 
     HandleResults(data: any): boolean {
+        // Capture query ID from first response
+        if (data.id && !this.queryId) {
+            this.queryId = data.id
+        }
+
         if (data.columns && this.columns !== data.columns) {
             this.columns = data.columns
             this.SetColumns(data.columns)

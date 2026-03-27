@@ -200,6 +200,8 @@ export const ModernQueryEditor = ({
     const [response, setResponse] = useState<any>(null)
     const [errorMessage, setErrorMessage] = useState('')
     const [queryText, setQueryText] = useState('SELECT * FROM tpch.tiny.nation LIMIT 10')
+    const [explainPlan, setExplainPlan] = useState<string | null>(null)
+    const [explainLoading, setExplainLoading] = useState(false)
 
     const currentTheme = theme === 'dark' ? darkTheme : lightTheme
 
@@ -236,20 +238,40 @@ export const ModernQueryEditor = ({
         setResults([])
         setColumns([])
         setQueryId(undefined)
+        setExplainPlan(null)
 
         const runner = new TrinoQueryRunner()
         runner.SetColumns = (cols: any[]) => setColumns(cols)
         runner.SetAllResultsCallback((rows: any[], error: boolean) => {
             setIsRunning(false)
-            if (!error) setResults(rows)
+            if (!error) {
+                setResults(rows)
+                const id = runner.GetQueryId()
+                if (id) setQueryId(id)
+            }
         })
         runner.SetErrorMessageCallback((msg: string) => {
             setIsRunning(false)
             setErrorMessage(msg)
         })
-        runner.SetStopped = () => setIsRunning(false)
+        runner.SetStopped = () => {
+            setIsRunning(false)
+            const id = runner.GetQueryId()
+            if (id) setQueryId(id)
+        }
         runner.StartQuery(queryText)
     }, [queryText])
+
+    // Fetch explain plan when the explain tab is active and we have a queryId
+    useEffect(() => {
+        if (activeTab !== 'explain' || !queryId || explainPlan !== null) return
+        setExplainLoading(true)
+        fetch(`/v1/query/${queryId}/explain`)
+            .then(r => r.ok ? r.json() : r.json().then((j: any) => { throw new Error(j?.error?.message || 'Failed to load plan') }))
+            .then((d: any) => setExplainPlan(d.plan ?? JSON.stringify(d, null, 2)))
+            .catch((e: Error) => setExplainPlan(`Error loading plan: ${e.message}`))
+            .finally(() => setExplainLoading(false))
+    }, [activeTab, queryId, explainPlan])
 
     const handleClearResults = useCallback((id: string | undefined) => {
         setResults([])
@@ -412,15 +434,33 @@ export const ModernQueryEditor = ({
                                     )
                                 )}
                                 {activeTab === 'explain' && (
-                                    <EmptyState>
-                                        <AccountTreeIcon sx={{ fontSize: 48, opacity: 0.3 }} />
-                                        <Typography variant="body2">
-                                            Query execution plan
-                                        </Typography>
-                                        <Typography variant="caption" sx={{ opacity: 0.5 }}>
-                                            View the query plan visualization
-                                        </Typography>
-                                    </EmptyState>
+                                    !queryId ? (
+                                        <EmptyState>
+                                            <AccountTreeIcon sx={{ fontSize: 48, opacity: 0.3 }} />
+                                            <Typography variant="body2">Query execution plan</Typography>
+                                            <Typography variant="caption" sx={{ opacity: 0.5 }}>
+                                                Run a query first to view the execution plan
+                                            </Typography>
+                                        </EmptyState>
+                                    ) : explainLoading ? (
+                                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                                            <CircularProgress size={24} />
+                                        </Box>
+                                    ) : (
+                                        <Box sx={{
+                                            fontFamily: themeTokens.fonts.mono,
+                                            fontSize: 12,
+                                            whiteSpace: 'pre',
+                                            overflowX: 'auto',
+                                            overflowY: 'auto',
+                                            height: '100%',
+                                            padding: 2,
+                                            color: themeTokens.colors.textPrimary,
+                                            lineHeight: 1.6,
+                                        }}>
+                                            {explainPlan || 'No plan available'}
+                                        </Box>
+                                    )
                                 )}
                             </Box>
                         </ResultsSection>

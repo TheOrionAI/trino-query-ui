@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react'
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import TrinoQueryRunner from './AsyncTrinoClient'
 import QueryCharts from './QueryCharts'
 import Editor from '@monaco-editor/react'
@@ -66,13 +66,21 @@ function runSimpleQuery(sql: string): Promise<any[][]> {
   })
 }
 
-interface QueryTab { id: number; name: string; query: string; results: any[][]; columns: any[]; isRunning: boolean; completed: boolean; error?: string; execMs?: number }
+const DISPLAY_LIMIT = 1000
+
+interface QueryTab { id: number; name: string; query: string; results: any[][]; columns: any[]; isRunning: boolean; completed: boolean; totalRows: number; trimmed: boolean; error?: string; execMs?: number; queryId?: string; explain?: string; explainLoading?: boolean }
 interface TreeNode { name: string; type: string; expanded?: boolean; children?: TreeNode[]; colType?: string }
 
 export const QueryIDE = () => {
   const [darkMode, setDarkMode] = useState(false)
-  const [tabs, setTabs] = useState<QueryTab[]>([{ id: 1, name: 'Query 1', query: 'SELECT * FROM tpch.sf1.nation LIMIT 10', results: [], columns: [], isRunning: false, completed: false }])
+  const [tabs, setTabs] = useState<QueryTab[]>([{ id: 1, name: 'Query 1', query: 'SELECT * FROM tpch.sf1.nation LIMIT 10', results: [], columns: [], isRunning: false, completed: false, totalRows: 0, trimmed: false, queryId: undefined, explain: undefined }])
+  const [maxRows, setMaxRows] = useState<number>(10000)
+  const [noLimit, setNoLimit] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [activeTabId, setActiveTabId] = useState(1)
+  const [systemStats, setSystemStats] = useState<{ memUsed: number; memTotal: number; cpu: number; activeQueries: number; totalQueries: number } | null>(null)
+  const [failedCatalogs, setFailedCatalogs] = useState<{ name: string; error: string }[]>([])
   const [showInspector, setShowInspector] = useState(true)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [showTableSelect, setShowTableSelect] = useState(false)
@@ -80,14 +88,14 @@ export const QueryIDE = () => {
   const [schemaSearch, setSchemaSearch] = useState('')
   const [schemaTree, setSchemaTree] = useState<TreeNode[]>([])
   const [schemaLoading, setSchemaLoading] = useState(false)
-  const [resultTab, setResultTab] = useState<'table' | 'chart'>('table')
+  const [resultTab, setResultTab] = useState<'table' | 'chart' | 'explain'>('table')
 
   const colors = darkMode ? darkColors : lightColors
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0]
 
   const handleTabChange = (id: number) => setActiveTabId(id)
-  const addNewTab = () => { const n = Math.max(...tabs.map(t => t.id)) + 1; setTabs([...tabs, { id: n, name: `Query ${n}`, query: 'SELECT * FROM ', results: [], columns: [], isRunning: false, completed: false }]); setActiveTabId(n) }
+  const addNewTab = () => { const n = Math.max(...tabs.map(t => t.id)) + 1; setTabs([...tabs, { id: n, name: `Query ${n}`, query: 'SELECT * FROM ', results: [], columns: [], isRunning: false, completed: false, totalRows: 0, trimmed: false, queryId: undefined, explain: undefined }]); setActiveTabId(n) }
   const closeTab = (id: number) => { if (tabs.length === 1) return; const n = tabs.filter(t => t.id !== id); setTabs(n); if (activeTabId === id) setActiveTabId(n[0].id) }
   const updateQuery = (q: string) => setTabs(tabs.map(t => t.id === activeTabId ? { ...t, query: q } : t))
 
@@ -121,25 +129,87 @@ export const QueryIDE = () => {
 
   useEffect(() => { loadSchemaTree() }, [loadSchemaTree])
 
+  // Poll real system metrics from /v1/dashboard every 5s
+  useEffect(() => {
+    const fetchStats = () => {
+      fetch('/v1/dashboard').then(r => r.json()).then(d => {
+        const w = d.workers?.[0]
+        if (w) setSystemStats({
+          memUsed: w.memory_used_bytes,
+          memTotal: w.memory_total_bytes,
+          cpu: w.cpu_percent,
+          activeQueries: d.active_queries ?? 0,
+          totalQueries: d.total_queries ?? 0,
+        })
+      }).catch(() => {})
+    }
+    fetchStats()
+    const id = setInterval(fetchStats, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Fetch failed catalogs once at startup
+  useEffect(() => {
+    fetch('/v1/catalog-status').then(r => r.json()).then(d => {
+      setFailedCatalogs((d.failed ?? []).map((f: any) => ({ name: f.name, error: f.error })))
+    }).catch(() => {})
+  }, [])
+
+  // Live elapsed timer — ticks every 100ms while a query is running
+  useEffect(() => {
+    if (activeTab.isRunning) {
+      setElapsed(0)
+      const start = Date.now()
+      timerRef.current = setInterval(() => setElapsed(Date.now() - start), 100)
+    } else {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+    }
+    return () => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null } }
+  }, [activeTab.isRunning])
+
   const handleRunQuery = useCallback(() => {
     const sql = activeTab.query.trim()
     if (!sql || activeTab.isRunning) return
     const startMs = Date.now()
-    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: true, completed: false, error: undefined, results: [], columns: [] } : t))
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: true, completed: false, error: undefined, results: [], columns: [], totalRows: 0, trimmed: false } : t))
     const runner = new TrinoQueryRunner()
+    runner.SetMaxRows(noLimit ? Number.MAX_SAFE_INTEGER : maxRows)
     runner.SetColumns = (cols: any[]) => {
       setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, columns: cols } : t))
     }
+    // Streaming: update live row count and show first DISPLAY_LIMIT rows as they arrive
+    runner.SetResults = (pages: any[][]) => {
+      const allRows = pages.flat()
+      setTabs(prev => prev.map(t => t.id === activeTabId
+        ? { ...t, totalRows: allRows.length, results: allRows.slice(0, DISPLAY_LIMIT) }
+        : t))
+    }
     runner.SetAllResultsCallback((rows: any[], error: boolean) => {
       const execMs = Date.now() - startMs
-      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: false, completed: !error, results: rows, execMs } : t))
+      const queryId = runner.GetQueryId() ?? undefined
+      setTabs(prev => prev.map(t => t.id === activeTabId
+        ? { ...t, isRunning: false, completed: !error, results: rows.slice(0, DISPLAY_LIMIT), totalRows: rows.length, execMs, queryId }
+        : t))
     })
     runner.SetErrorMessageCallback((msg: string) => {
-      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: false, error: msg } : t))
+      // "Results were trimmed" is an expected fetch-limit, not a query error — show as info
+      if (msg.startsWith('Results were trimmed')) {
+        setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, trimmed: true } : t))
+      } else {
+        setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isRunning: false, error: msg } : t))
+      }
     })
     runner.SetStopped = () => {}
     runner.StartQuery(sql)
-  }, [activeTabId, activeTab.query, activeTab.isRunning])
+  }, [activeTabId, activeTab.query, activeTab.isRunning, maxRows])
+
+  const fetchExplain = useCallback((tabId: number, queryId: string) => {
+    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, explainLoading: true } : t))
+    fetch(`/v1/query/${queryId}/explain`)
+      .then(r => r.json())
+      .then(d => setTabs(prev => prev.map(t => t.id === tabId ? { ...t, explainLoading: false, explain: d.plan ?? JSON.stringify(d, null, 2) } : t)))
+      .catch(e => setTabs(prev => prev.map(t => t.id === tabId ? { ...t, explainLoading: false, explain: `Error fetching plan: ${e}` } : t)))
+  }, [])
 
   const insertTable = (table: string) => { updateQuery(`SELECT * FROM ${table} LIMIT 100`); setShowTableSelect(false) }
 
@@ -500,6 +570,30 @@ export const QueryIDE = () => {
             <BarChartIcon sx={{ fontSize: 14 }} />
           </IconBtn>
           <IconBtn size="small"><SearchIcon sx={{ fontSize: 14 }} /></IconBtn>
+          {/* Row fetch limit controls */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, border: `1px solid ${colors.border}`, borderRadius: 1, px: 0.75, height: 24 }}>
+            <Typography sx={{ fontSize: 10, color: colors.textMuted, userSelect: 'none' }}>Limit</Typography>
+            <TextField
+              size="small"
+              type="number"
+              value={maxRows}
+              disabled={noLimit}
+              onChange={e => setMaxRows(Math.max(1, parseInt(e.target.value) || 10000))}
+              inputProps={{ min: 1, style: { width: 64, fontSize: 11, padding: '1px 4px', textAlign: 'right' } }}
+              sx={{ '& .MuiOutlinedInput-root': { height: 18, fontSize: 11, color: noLimit ? colors.textMuted : colors.textSecondary, '& fieldset': { border: 'none' } } }}
+            />
+            <Box
+              onClick={() => setNoLimit(v => !v)}
+              title={noLimit ? 'Row limit disabled — click to enable' : 'Click to disable row limit'}
+              sx={{
+                fontSize: 10, fontWeight: 700, cursor: 'pointer', px: 0.5, borderRadius: 0.5,
+                color: noLimit ? colors.primary : colors.textMuted,
+                backgroundColor: noLimit ? `${colors.primary}22` : 'transparent',
+                '&:hover': { color: colors.primary },
+                userSelect: 'none',
+              }}
+            >∞</Box>
+          </Box>
           <RunButton variant="contained" startIcon={<PlayArrowIcon sx={{ fontSize: 12 }} />} onClick={handleRunQuery} disabled={activeTab.isRunning}>
             {activeTab.isRunning ? 'Running...' : 'Run'}
           </RunButton>
@@ -550,7 +644,14 @@ export const QueryIDE = () => {
                 </TablePicker>
               </CellLabel>
               <CellStatus>
-                {activeTab.isRunning ? <><LinearProgress sx={{ width: 40, height: 3 }} /><span>Running...</span></> : activeTab.completed ? <><StatusDot /><span>{activeTab.execMs != null ? `${activeTab.execMs}ms` : 'done'}</span></> : activeTab.error ? <span style={{ color: '#f06c6c' }}>Error</span> : <span>Ready</span>}
+                {activeTab.isRunning
+                  ? <><LinearProgress sx={{ width: 40, height: 3 }} /><span>{(elapsed / 1000).toFixed(1)}s{activeTab.totalRows > 0 ? ` · ${activeTab.totalRows.toLocaleString()} rows` : ''}</span></>
+                  : activeTab.completed
+                    ? <><StatusDot /><span>{activeTab.execMs != null ? `${(activeTab.execMs / 1000).toFixed(2)}s` : 'done'}{activeTab.totalRows > 0 ? ` · ${activeTab.totalRows.toLocaleString()} rows` : ''}</span></>
+                    : activeTab.error
+                      ? <span style={{ color: '#f06c6c' }}>Error</span>
+                      : <span>Ready</span>
+                }
               </CellStatus>
             </CellHeader>
             <CellEditor>
@@ -581,10 +682,15 @@ export const QueryIDE = () => {
               <CellResults>
                 {/* Result tab bar: Table | Chart */}
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: `1px solid ${colors.border}`, backgroundColor: colors.bgSecondary }}>
-                  {(['table', 'chart'] as const).map(tab => (
+                  {(['table', 'chart', 'explain'] as const).map(tab => (
                     <Box
                       key={tab}
-                      onClick={() => setResultTab(tab)}
+                      onClick={() => {
+                        setResultTab(tab)
+                        if (tab === 'explain' && activeTab.queryId && !activeTab.explain && !activeTab.explainLoading) {
+                          fetchExplain(activeTabId, activeTab.queryId)
+                        }
+                      }}
                       sx={{
                         px: 1, py: 0.25, fontSize: 10, fontWeight: 600, cursor: 'pointer', borderRadius: 1,
                         textTransform: 'uppercase', letterSpacing: '0.05em',
@@ -593,7 +699,7 @@ export const QueryIDE = () => {
                         '&:hover': { color: colors.primary },
                       }}
                     >
-                      {tab === 'table' ? 'Table' : 'Chart'}
+                      {tab === 'table' ? 'Table' : tab === 'chart' ? 'Chart' : 'Explain'}
                     </Box>
                   ))}
                 </Box>
@@ -621,11 +727,18 @@ export const QueryIDE = () => {
                       </TableBody>
                     </ResultsTable>
                     <ResultFooter>
-                      <span>{activeTab.results.length} rows</span>
+                      <span>
+                        {activeTab.isRunning
+                          ? `Fetching… ${activeTab.totalRows.toLocaleString()} rows`
+                          : activeTab.totalRows > DISPLAY_LIMIT
+                            ? `Showing ${DISPLAY_LIMIT.toLocaleString()} of ${activeTab.totalRows.toLocaleString()} rows${activeTab.trimmed ? ` (capped at ${maxRows.toLocaleString()})` : ''}`
+                            : `${activeTab.totalRows.toLocaleString()} rows`
+                        }
+                      </span>
                       <span>{activeTab.execMs != null ? `${activeTab.execMs}ms` : ''}</span>
                     </ResultFooter>
                   </>
-                ) : (
+                ) : resultTab === 'chart' ? (
                   <QueryCharts
                     columns={activeTab.columns}
                     rows={activeTab.results.map((row: any[]) =>
@@ -633,6 +746,22 @@ export const QueryIDE = () => {
                     )}
                     height={300}
                   />
+                ) : (
+                  <Box sx={{ p: 1.5, height: '100%', overflow: 'auto' }}>
+                    {activeTab.explainLoading ? (
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: colors.textMuted, fontSize: 11 }}>
+                        <LinearProgress sx={{ width: 60, height: 2 }} /><span>Loading plan…</span>
+                      </Box>
+                    ) : activeTab.explain ? (
+                      <Box component="pre" sx={{ fontSize: 10, fontFamily: '"JetBrains Mono", monospace', color: colors.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word', m: 0 }}>
+                        {activeTab.explain}
+                      </Box>
+                    ) : !activeTab.queryId ? (
+                      <Typography sx={{ fontSize: 11, color: colors.textMuted }}>Run a query first to see the execution plan.</Typography>
+                    ) : (
+                      <Typography sx={{ fontSize: 11, color: colors.textMuted }}>Click the Explain tab to load the plan.</Typography>
+                    )}
+                  </Box>
                 )}
               </CellResults>
             )}
@@ -640,13 +769,38 @@ export const QueryIDE = () => {
         </Workspace>
 
         {showInspector && (
-          <Box sx={{ width: 160, backgroundColor: colors.bgSecondary, borderLeft: `1px solid ${colors.border}`, p: 1 }}>
+          <Box sx={{ width: 175, backgroundColor: colors.bgSecondary, borderLeft: `1px solid ${colors.border}`, p: 1, overflowY: 'auto' }}>
             <SidebarTitleText sx={{ mb: 1 }}>Inspector</SidebarTitleText>
             <AnalyticsCard sx={{ mb: 1 }}>
               <AnalyticsTitle>Query</AnalyticsTitle>
-              <InspectorRow><InspectorLabel>State</InspectorLabel><InspectorValue>{activeTab.completed ? 'FINISHED' : 'READY'}</InspectorValue></InspectorRow>
-              <InspectorRow><InspectorLabel>Rows</InspectorLabel><InspectorValue>{activeTab.results.length}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>State</InspectorLabel><InspectorValue>{activeTab.isRunning ? 'RUNNING' : activeTab.completed ? 'FINISHED' : 'READY'}</InspectorValue></InspectorRow>
+              <InspectorRow><InspectorLabel>Rows</InspectorLabel><InspectorValue>{activeTab.totalRows > 0 ? activeTab.totalRows.toLocaleString() : activeTab.results.length}</InspectorValue></InspectorRow>
+              {activeTab.execMs != null && <InspectorRow><InspectorLabel>Time</InspectorLabel><InspectorValue>{(activeTab.execMs / 1000).toFixed(2)}s</InspectorValue></InspectorRow>}
+              {activeTab.queryId && <InspectorRow><InspectorLabel>ID</InspectorLabel><InspectorValue sx={{ fontSize: 8, wordBreak: 'break-all' }}>{activeTab.queryId.slice(0, 8)}…</InspectorValue></InspectorRow>}
             </AnalyticsCard>
+            {systemStats && (
+              <AnalyticsCard sx={{ mb: 1 }}>
+                <AnalyticsTitle>System</AnalyticsTitle>
+                <InspectorRow><InspectorLabel>CPU</InspectorLabel><InspectorValue>{systemStats.cpu.toFixed(1)}%</InspectorValue></InspectorRow>
+                <InspectorRow>
+                  <InspectorLabel>Memory</InspectorLabel>
+                  <InspectorValue>{(systemStats.memUsed / 1073741824).toFixed(1)}/<span style={{ opacity: 0.6 }}>{(systemStats.memTotal / 1073741824).toFixed(0)}GB</span></InspectorValue>
+                </InspectorRow>
+                <InspectorRow><InspectorLabel>Active Q</InspectorLabel><InspectorValue>{systemStats.activeQueries}</InspectorValue></InspectorRow>
+                <InspectorRow><InspectorLabel>Total Q</InspectorLabel><InspectorValue>{systemStats.totalQueries}</InspectorValue></InspectorRow>
+              </AnalyticsCard>
+            )}
+            {failedCatalogs.length > 0 && (
+              <AnalyticsCard sx={{ mb: 1, borderColor: '#f06c6c44' }}>
+                <AnalyticsTitle sx={{ color: '#f06c6c' }}>Failed Catalogs</AnalyticsTitle>
+                {failedCatalogs.map(fc => (
+                  <InspectorRow key={fc.name} title={fc.error}>
+                    <InspectorLabel sx={{ color: '#f06c6c' }}>{fc.name}</InspectorLabel>
+                    <InspectorValue sx={{ fontSize: 8, color: '#f06c6c', maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={fc.error}>error</InspectorValue>
+                  </InspectorRow>
+                ))}
+              </AnalyticsCard>
+            )}
             <AnalyticsCard>
               <AnalyticsTitle>History</AnalyticsTitle>
               <Sparkline>{sparkData.map((h, i) => <SparkBar key={i} h={h} />)}</Sparkline>
